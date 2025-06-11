@@ -9,7 +9,7 @@ module RISCV_Pipeline (
   // Memórias e banco de registradores
   //===============================
   reg [31:0] instr_mem [0:21];    // Memória de instruções (22 palavras)
-  reg [15:0] data_mem  [0:255];   // Memória de dados
+  reg [31:0] data_mem  [0:255];   // Memória de dados
   reg [31:0] banco_regs [0:31];   // 32 registradores
   reg [31:0] register_address;    // Para armazenar endereço de retorno (x1)
 
@@ -17,7 +17,7 @@ module RISCV_Pipeline (
   // Registradores do Pipeline
   //======================
 
-  // IF / ID
+  // IF
   reg [31:0] IF_instr, IF_PC;
 
   // ID
@@ -124,7 +124,7 @@ module RISCV_Pipeline (
 
   
     //=======================
-  // Cache de Instruções (direta, 4 linhas como exemplo)
+  // Cache de Instruções (direta, 4 linhas)
   //=======================
   reg [31:0] instr_cache_data [0:3];  // Dados da cache
   reg [27:0] instr_cache_tag  [0:3];  // Tags da cache (endereços sem offset)
@@ -133,7 +133,16 @@ module RISCV_Pipeline (
   wire [1:0] cache_index = PC[3:2];   // Indexa 4 linhas (usando bits 3:2)
   wire [27:0] cache_tag   = PC[31:4]; // Tag (sem os 4 bits menos significativos)
 
-  
+    //=======================
+  // Cache de Dados (direta, 4 linhas)
+  //=======================
+  reg [15:0] data_cache_data [0:3];  // Dados da cache (16 bits)
+  reg [27:0] data_cache_tag  [0:3];  // Tags da cache (endereços sem offset)
+  reg        data_cache_valid[0:3];  // Bits de validade da cache
+
+  wire [1:0]  data_cache_index = EX_alu_result[3:2];   // Indexa 4 linhas
+  wire [27:0] data_cache_tag_addr = EX_alu_result[31:4]; // Tag
+
   
   
   //=======================
@@ -148,12 +157,28 @@ module RISCV_Pipeline (
     instr_mem[2] = 32'b00000000001000001000000110110011; // add x3, x1, x2
     instr_mem[3] = 32'b01000000010100011000001000110011; // sub x4, x3, x5
     instr_mem[4] = 32'b00000010001100100000001010110011; // mul x5, x4, x3
-    instr_mem[5] = 32'b0000000001010010100000110011001;  // add x6, x5, x5 (bit faltando)
+	instr_mem[5] = 32'b00000000000000000100001110000011; // lw x7, 0(x0)
+	instr_mem[6] = 32'b00000000010000000110010000000011; // lw x8, 4(x0)
+
 
     // Zera banco de registradores e memória
     for (i = 0; i < 32; i = i + 1) banco_regs[i] = 0;
     for (i = 0; i < 256; i = i + 1) data_mem[i]  = 0;
+    
+        for (i = 0; i < 4; i = i + 1) begin
+      data_cache_valid[i] <= 0;
+      data_cache_tag[i]   <= 0;
+      data_cache_data[i]  <= 0;
+    end
+
+      // Inicializa a memória de dados com valores específicos
+  data_mem[0] = 32'b00000000000000000000001000000000;
+  data_mem[1] = 32'b00000000000000000000010000000000;
+  data_mem[2] = 32'b00000000000000000000100000000000;
+  data_mem[3] = 32'b00000000000000000001000000000000;
   end
+    
+ 
 
   //=======================
   // Atualização do PC
@@ -340,27 +365,40 @@ module RISCV_Pipeline (
   //====================
   // Estágio MEM
   //====================
-    always @(posedge clock or posedge reset) begin
+     always @(posedge clock or posedge reset) begin
     if (reset) begin
-      MEM_instr    <= 0;
-      MEM_rd       <= 0;
-      MEM_opcode   <= 0;
-      MEM_data     <= 0;
+      MEM_instr   <= 0;
+      MEM_data    <= 0;
+      MEM_rd      <= 0;
+      MEM_opcode  <= 0;
       MEM_regwrite <= 0;
     end else begin
-      MEM_instr    <= EX_instr;
-      MEM_rd       <= EX_rd;
-      MEM_opcode   <= EX_opcode;
+      MEM_instr   <= EX_instr;
+      MEM_rd      <= EX_rd;
+      MEM_opcode  <= EX_opcode;
       MEM_regwrite <= EX_regwrite;
 
-      case (EX_opcode)
-        7'b0000011: // lw
-          MEM_data <= {16'b0, data_mem[EX_alu_result]};
-        7'b0100011: // sw
-          data_mem[EX_alu_result] <= EX_r2[15:0];
-        default:
-          MEM_data <= EX_alu_result;
-      endcase
+      if (EX_opcode == 7'b0000011) begin // LW
+        // Leitura da cache de dados
+        if (data_cache_valid[data_cache_index] && data_cache_tag[data_cache_index] == data_cache_tag_addr) begin
+          // Cache hit
+          MEM_data <= {16'b0, data_cache_data[data_cache_index]};
+        end else begin
+          // Cache miss: acessa memória principal e atualiza cache
+          data_cache_data[data_cache_index]  <= data_mem[EX_alu_result >> 1]; // 16 bits por posição
+          data_cache_tag[data_cache_index]   <= data_cache_tag_addr;
+          data_cache_valid[data_cache_index] <= 1;
+          MEM_data <= {16'b0, data_mem[EX_alu_result >> 1]};
+        end
+      end else if (EX_opcode == 7'b0100011) begin // SW
+        // Escrita direta na memória principal
+        data_mem[EX_alu_result >> 1] <= EX_r2[15:0];
+
+        // Invalida a linha da cache correspondente (write-through + no write-allocate)
+        data_cache_valid[data_cache_index] <= 0;
+      end else begin
+        MEM_data <= EX_alu_result; // Para instruções tipo R e AUIPC
+      end
     end
   end
 

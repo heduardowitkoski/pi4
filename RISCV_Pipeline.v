@@ -6,10 +6,10 @@ module RISCV_Pipeline (
   integer i;
 
   //===============================
-  // Memórias e banco de registradores
+  // MemÃ³rias e banco de registradores
   //===============================
-  reg [31:0] instr_mem [0:21];    // Memória de instruções (22 palavras)
-  reg [31:0] data_mem  [0:255];   // Memória de dados
+  reg [31:0] instr_mem [0:21];    // Memoria de instruçoes
+  reg [31:0] data_mem  [0:255];   // Memoria de dados
   reg [31:0] banco_regs [0:31];   // 32 registradores
   reg [31:0] register_address;    // Para armazenar endereço de retorno (x1)
 
@@ -54,7 +54,7 @@ module RISCV_Pipeline (
   reg EX_regwrite;
 
   //=======================
-  // Sinais Intermediários
+  // Sinais Intermediarios
   //=======================
   reg  [31:0] alu_result, branch_target;
   reg         branch_taken;
@@ -82,7 +82,7 @@ module RISCV_Pipeline (
                         ID_r2;
 
   //=======================
-  // Estágio EX: Execução
+  // Estagio EX: Execução
   //=======================
   always @(*) begin
     alu_result    = 0;
@@ -127,7 +127,7 @@ module RISCV_Pipeline (
   // Cache de Instruções (direta, 4 linhas)
   //=======================
   reg [31:0] instr_cache_data [0:3];  // Dados da cache
-  reg [27:0] instr_cache_tag  [0:3];  // Tags da cache (endereços sem offset)
+  reg [27:0] instr_cache_tag  [0:3];  // Tags da cache (endereÃ§os sem offset)
   reg        instr_cache_valid[0:3];  // Bits de validade da cache
 
   wire [1:0] cache_index = PC[3:2];   // Indexa 4 linhas (usando bits 3:2)
@@ -137,7 +137,7 @@ module RISCV_Pipeline (
   // Cache de Dados (direta, 4 linhas)
   //=======================
   reg [15:0] data_cache_data [0:3];  // Dados da cache (16 bits)
-  reg [27:0] data_cache_tag  [0:3];  // Tags da cache (endereços sem offset)
+  reg [27:0] data_cache_tag  [0:3];  // Tags da cache
   reg        data_cache_valid[0:3];  // Bits de validade da cache
 
   wire [1:0]  data_cache_index = EX_alu_result[3:2];   // Indexa 4 linhas
@@ -161,7 +161,7 @@ module RISCV_Pipeline (
 	instr_mem[6] = 32'b00000000010000000110010000000011; // lw x8, 4(x0)
 
 
-    // Zera banco de registradores e memória
+    // Zera banco de registradores e memoria
     for (i = 0; i < 32; i = i + 1) banco_regs[i] = 0;
     for (i = 0; i < 256; i = i + 1) data_mem[i]  = 0;
     
@@ -171,7 +171,7 @@ module RISCV_Pipeline (
       data_cache_data[i]  <= 0;
     end
 
-      // Inicializa a memória de dados com valores específicos
+      // Inicializa a memória de dados
   data_mem[0] = 32'b00000000000000000000001000000000;
   data_mem[1] = 32'b00000000000000000000010000000000;
   data_mem[2] = 32'b00000000000000000000100000000000;
@@ -199,7 +199,7 @@ module RISCV_Pipeline (
   end
 
   //=======================
-  // Estágio IF: Busca de instrução
+  // Estagio IF: Busca de instrução
   //=======================
   always @(posedge clock or posedge reset) begin
     if (reset) begin
@@ -224,7 +224,7 @@ module RISCV_Pipeline (
         // Cache hit
         IF_instr <= instr_cache_data[cache_index];
       end else begin
-        // Cache miss: busca da memória principal
+        // Cache miss: busca da memoria principal
         IF_instr <= instr_mem[PC >> 2];
         instr_cache_data[cache_index]  <= instr_mem[PC >> 2];
         instr_cache_tag[cache_index]   <= cache_tag;
@@ -235,7 +235,7 @@ module RISCV_Pipeline (
 
 
   //=======================
-  // Estágio ID: Decodificação
+  // Estagio ID: Decodificação
   //=======================
   always @(posedge clock or posedge reset) begin
     if (reset || EX_salto_cond || EX_opcode == 7'b1101111) begin
@@ -331,7 +331,7 @@ module RISCV_Pipeline (
   end
 
   //====================
-  // Estágio EX
+  // Estagio EX
   //====================
    always @(posedge clock or posedge reset) begin
     if (reset) begin
@@ -363,7 +363,7 @@ module RISCV_Pipeline (
 
 
   //====================
-  // Estágio MEM
+  // Estagio MEM
   //====================
      always @(posedge clock or posedge reset) begin
     if (reset) begin
@@ -391,7 +391,7 @@ module RISCV_Pipeline (
           MEM_data <= {16'b0, data_mem[EX_alu_result >> 1]};
         end
       end else if (EX_opcode == 7'b0100011) begin // SW
-        // Escrita direta na memória principal
+        // Escrita direta na memoria principal
         data_mem[EX_alu_result >> 1] <= EX_r2[15:0];
 
         // Invalida a linha da cache correspondente (write-through + no write-allocate)
@@ -404,7 +404,7 @@ module RISCV_Pipeline (
 
 
   //====================
-  // Estágio WB
+  // Estagio WB
   //====================
     always @(posedge clock or posedge reset) begin
     if (reset) begin

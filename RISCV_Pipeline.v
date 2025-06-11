@@ -2,214 +2,382 @@ module RISCV_Pipeline (
     input wire clock,
     input wire reset
 );
+
   integer i;
+
   //===============================
-  // Memória de instruções e dados
+  // Memórias e banco de registradores
   //===============================
-  reg [31:0] instr_mem [0:15];  // 16 instruções
-  reg [15:0] data_mem  [0:255]; // memória de dados
-  reg [15:0] regfile   [0:31];  // 32 registradores
+  reg [31:0] instr_mem [0:21];    // Memória de instruções (22 palavras)
+  reg [15:0] data_mem  [0:255];   // Memória de dados
+  reg [31:0] banco_regs [0:31];   // 32 registradores
+  reg [31:0] register_address;    // Para armazenar endereço de retorno (x1)
+
+  //======================
+  // Registradores do Pipeline
+  //======================
+
+  // IF / ID
+  reg [31:0] IF_instr, IF_PC;
+
+  // ID
+  reg [31:0] ID_instr, ID_PC, ID_r1, ID_r2;
+  reg [4:0]  ID_indiceR1, ID_indiceR2, ID_rd;
+  reg [19:0] ID_imm, branch_valor;
+  reg [6:0]  ID_opcode, ID_funct7;
+  reg [2:0]  ID_funct3;
+  reg [31:0] link;
+  reg        ID_regwrite;
+
+  // EX
+  reg [31:0] EX_instr, EX_alu_result, EX_r2;
+  reg [4:0]  EX_rd;
+  reg [6:0]  EX_opcode;
+  reg [19:0] EX_imm;
+  reg [31:0] imm_sext, imm_shift, AUIPC_result;
+
+  // MEM
+  reg [31:0] MEM_instr, MEM_data;
+  reg [4:0]  MEM_rd;
+  reg [6:0]  MEM_opcode;
+  reg        MEM_regwrite;
 
   //=======================
-  // Registradores pipeline
+  // Contador de Programa
   //=======================
-  // IF/ID
-  reg [31:0] IF_ID_instr;
-  reg [31:0] IF_ID_PC;
-
-  // ID/EX
-  reg [15:0] ID_EX_rs1_data, ID_EX_rs2_data;
-  reg [15:0] ID_EX_imm;
-  reg [4:0]  ID_EX_rs1, ID_EX_rs2, ID_EX_rd;
-  reg [6:0]  ID_EX_opcode;
-  reg [2:0]  ID_EX_funct3;
-  reg [6:0]  ID_EX_funct7;
-
-  // EX/MEM
-  reg [15:0] EX_MEM_alu_result, EX_MEM_rs2_data;
-  reg [4:0]  EX_MEM_rd;
-  reg [6:0]  EX_MEM_opcode;
-
-  // MEM/WB
-  reg [15:0] MEM_WB_data;
-  reg [4:0]  MEM_WB_rd;
-  reg [6:0]  MEM_WB_opcode;
-
-  //=====================
-  // Contador de programa
-  //=====================
   reg [31:0] PC;
 
-  //=====================
+  //=======================
+  // Sinais de Controle
+  //=======================
+  reg EX_salto_cond, flag_jump;
+  reg EX_regwrite;
+
+  //=======================
+  // Sinais Intermediários
+  //=======================
+  reg  [31:0] alu_result, branch_target;
+  reg         branch_taken;
+  reg         bge_taken, blt_taken;
+
+  //=======================
+  // Forwarding Logic
+  //=======================
+  wire fwdEX_r1 = EX_regwrite  && (EX_rd == ID_indiceR1) && (EX_rd != 0);
+  wire fwdWB_r1 = MEM_regwrite && (MEM_rd == ID_indiceR1) && !fwdEX_r1 && (MEM_rd != 0);
+  wire fwdEX_r2 = EX_regwrite  && (EX_rd == ID_indiceR2) && (EX_rd != 0);
+  wire fwdWB_r2 = MEM_regwrite && (MEM_rd == ID_indiceR2) && !fwdEX_r2 && (MEM_rd != 0);
+
+  //=======================
+  // Seleção de operandos para ULA (ALU Mux)
+  //=======================
+  wire [31:0] alu_in1 = fwdEX_r1 ? EX_alu_result :
+                        fwdWB_r1 ? MEM_data :
+                        ID_r1;
+
+  wire [31:0] alu_in2 = (ID_opcode == 7'b0010011 || ID_opcode == 7'b0000011 || ID_opcode == 7'b0100011) ?
+                          ID_imm :
+                        fwdEX_r2 ? EX_alu_result :
+                        fwdWB_r2 ? MEM_data :
+                        ID_r2;
+
+  //=======================
+  // Estágio EX: Execução
+  //=======================
+  always @(*) begin
+    alu_result    = 0;
+    branch_taken  = 0;
+    branch_target = 0;
+
+    case (ID_opcode)
+      7'b0110011: begin // R-Type
+        case (ID_funct7)
+          7'b0000000: alu_result = alu_in1 + alu_in2;
+          7'b0000001: alu_result = alu_in1 * alu_in2;
+          7'b0100000: alu_result = alu_in1 - alu_in2;
+          default:    alu_result = 0;
+        endcase
+      end
+
+      7'b0010011,  // ADDI
+      7'b0000011,  // LW
+      7'b0100011:  // SW
+        alu_result = alu_in1 + ID_imm;
+
+      7'b0010111: // AUIPC
+        alu_result = imm_shift + ID_PC;
+
+      7'b1100011: begin // Branch
+        bge_taken     = (ID_funct3 == 3'b101) && (alu_in1 >= alu_in2);
+        blt_taken     = (ID_funct3 == 3'b100) && (alu_in1 <  alu_in2);
+        branch_taken  = bge_taken || blt_taken;
+        branch_target = ID_PC + ID_imm;
+      end
+
+      default: begin
+        alu_result    = 0;
+        branch_taken  = 0;
+        branch_target = 0;
+      end
+    endcase
+  end
+
+  
+    //=======================
+  // Cache de Instruções (direta, 4 linhas como exemplo)
+  //=======================
+  reg [31:0] instr_cache_data [0:3];  // Dados da cache
+  reg [27:0] instr_cache_tag  [0:3];  // Tags da cache (endereços sem offset)
+  reg        instr_cache_valid[0:3];  // Bits de validade da cache
+
+  wire [1:0] cache_index = PC[3:2];   // Indexa 4 linhas (usando bits 3:2)
+  wire [27:0] cache_tag   = PC[31:4]; // Tag (sem os 4 bits menos significativos)
+
+  
+  
+  
+  //=======================
   // Inicialização
-  //=====================
+  //=======================
   initial begin
     PC = 0;
 
-    // instruções:
-    // addi x1, x0, 5     ; x1 = 5
-    // addi x2, x0, 10    ; x2 = 10
-    // add  x3, x1, x2    ; x3 = x1 + x2 = 15
-    // sub  x4, x2, x1    ; x4 = x2 - x1 = 5
-    // sw   x3, 0(x0)     ; mem[0] = x3 = 15
-    // lw   x5, 0(x0)     ; x5 = mem[0] = 15
+    // Exemplo de instruções: addi, add, sub, mul, etc.
+    instr_mem[0] = 32'b00000000101000000000000010010011; // addi x1, x0, 10
+    instr_mem[1] = 32'b00000001010000000000000100010011; // addi x2, x0, 20
+    instr_mem[2] = 32'b00000000001000001000000110110011; // add x3, x1, x2
+    instr_mem[3] = 32'b01000000010100011000001000110011; // sub x4, x3, x5
+    instr_mem[4] = 32'b00000010001100100000001010110011; // mul x5, x4, x3
+    instr_mem[5] = 32'b0000000001010010100000110011001;  // add x6, x5, x5 (bit faltando)
 
-    // 0: addi x1, x0,  5       ; x1 =  5
-    instr_mem[0]  = {12'd5,  5'd0, 3'b000, 5'd1, 7'b0010011};
-
-    // 1: addi x2, x0, 10       ; x2 = 10
-    instr_mem[1]  = {12'd10, 5'd0, 3'b000, 5'd2, 7'b0010011};
-
-    // 2–4: NOPs (aguarda x1 e x2 serem escritos)
-    instr_mem[2]  = 32'b0;
-    instr_mem[3]  = 32'b0;
-    instr_mem[4]  = 32'b0;
-
-    // 5: add  x3, x1, x2       ; x3 = x1 + x2 = 15
-    instr_mem[5]  = {7'b0000000, 5'd2, 5'd1, 3'b000, 5'd3, 7'b0110011};
-
-    // 6: sub  x4, x2, x1       ; x4 = x2 - x1 =  5
-    instr_mem[6]  = {7'b0100000, 5'd1, 5'd2, 3'b000, 5'd4, 7'b0110011};
-
-    // 7–8: NOPs (aguarda x3 ser escrito)
-    instr_mem[7]  = 32'b0;
-    instr_mem[8]  = 32'b0;
-
-    // 9: sw   x3, 0(x0)        ; mem[0] = x3 = 15
-    instr_mem[9]  = {7'b0000000, 5'd3, 5'd0, 3'b010, 5'd0, 7'b0100011};
-
-    // 10: lw   x5, 0(x0)       ; x5 = mem[0] = 15
-    instr_mem[10] = {12'd0, 5'd0, 3'b010, 5'd5, 7'b0000011};
-
-    // 11–15: NOPs ou instruções livres
-    instr_mem[11] = 32'b0;
-    instr_mem[12] = 32'b0;
-    instr_mem[13] = 32'b0;
-    instr_mem[14] = 32'b0;
-    instr_mem[15] = 32'b0;
-
-
-
-    // limpa banco de registradores e mem
-    for (i = 0; i < 32; i = i + 1) regfile[i] = 0;
-    for (i = 0; i < 256; i = i + 1) data_mem[i] = 0;
+    // Zera banco de registradores e memória
+    for (i = 0; i < 32; i = i + 1) banco_regs[i] = 0;
+    for (i = 0; i < 256; i = i + 1) data_mem[i]  = 0;
   end
 
-  //====================
-  // Estágio IF
-  //====================
+  //=======================
+  // Atualização do PC
+  //=======================
   always @(posedge clock or posedge reset) begin
     if (reset) begin
-      PC <= 0;
-      IF_ID_instr <= 0;
-      IF_ID_PC <= 0;
+      PC               <= 0;
+      register_address <= 0;
+      link             <= 0;
+    end else if (EX_salto_cond) begin
+      PC <= branch_valor;
+    end else if (flag_jump) begin
+      PC   <= ID_PC + ID_imm;
+      link <= PC + 4;
     end else begin
-      IF_ID_instr <= instr_mem[PC >> 2];
-      IF_ID_PC <= PC;
       PC <= PC + 4;
     end
   end
 
-  //====================
-  // Estágio ID
-  //====================
+  //=======================
+  // Estágio IF: Busca de instrução
+  //=======================
   always @(posedge clock or posedge reset) begin
     if (reset) begin
-      ID_EX_rs1_data <= 0;
-      ID_EX_rs2_data <= 0;
-      ID_EX_imm      <= 0;
-      ID_EX_rs1      <= 0;
-      ID_EX_rs2      <= 0;
-      ID_EX_rd       <= 0;
-      ID_EX_opcode   <= 0;
-      ID_EX_funct3   <= 0;
-      ID_EX_funct7   <= 0;
-    end else begin
-      ID_EX_opcode   <= IF_ID_instr[6:0];
-      ID_EX_rd       <= IF_ID_instr[11:7];
-      ID_EX_funct3   <= IF_ID_instr[14:12];
-      ID_EX_rs1      <= IF_ID_instr[19:15];
-      ID_EX_rs2      <= IF_ID_instr[24:20];
-      ID_EX_funct7   <= IF_ID_instr[31:25];
+      IF_instr <= 0;
+      IF_PC    <= 0;
 
-      ID_EX_rs1_data <= regfile[IF_ID_instr[19:15]];
-      ID_EX_rs2_data <= regfile[IF_ID_instr[24:20]];
-
-      // Imediato para I, S
-      if (IF_ID_instr[6:0] == 7'b0010011 || IF_ID_instr[6:0] == 7'b0000011) begin
-        ID_EX_imm <= {{4{IF_ID_instr[31]}}, IF_ID_instr[31:20]};
-      end else if (IF_ID_instr[6:0] == 7'b0100011) begin
-        ID_EX_imm <= {{4{IF_ID_instr[31]}}, IF_ID_instr[31:25], IF_ID_instr[11:7]};
-      end else begin
-        ID_EX_imm <= 0;
+      // Invalida a cache
+      for (i = 0; i < 4; i = i + 1) begin
+        instr_cache_valid[i] <= 0;
+        instr_cache_tag[i]   <= 0;
+        instr_cache_data[i]  <= 0;
       end
+
+    end else if (EX_salto_cond || EX_opcode == 7'b1101111) begin
+      IF_instr <= 0;
+      IF_PC    <= 0;
+
+    end else begin
+      IF_PC <= PC;
+
+      if (instr_cache_valid[cache_index] && instr_cache_tag[cache_index] == cache_tag) begin
+        // Cache hit
+        IF_instr <= instr_cache_data[cache_index];
+      end else begin
+        // Cache miss: busca da memória principal
+        IF_instr <= instr_mem[PC >> 2];
+        instr_cache_data[cache_index]  <= instr_mem[PC >> 2];
+        instr_cache_tag[cache_index]   <= cache_tag;
+        instr_cache_valid[cache_index] <= 1;
+      end
+    end
+  end
+
+
+  //=======================
+  // Estágio ID: Decodificação
+  //=======================
+  always @(posedge clock or posedge reset) begin
+    if (reset || EX_salto_cond || EX_opcode == 7'b1101111) begin
+      ID_instr     <= 0;
+      ID_PC        <= 0;
+      ID_r1        <= 0;
+      ID_r2        <= 0;
+      ID_indiceR1  <= 0;
+      ID_indiceR2  <= 0;
+      ID_imm       <= 0;
+      ID_rd        <= 0;
+      ID_opcode    <= 0;
+      ID_funct3    <= 0;
+      ID_funct7    <= 0;
+      ID_regwrite  <= 0;
+      imm_sext     <= 0;
+      imm_shift    <= 0;
+      flag_jump    <= 0;
+    end else begin
+      ID_instr  <= IF_instr;
+      ID_PC     <= IF_PC;
+      flag_jump <= 0;
+
+      case (IF_instr[6:0])
+        7'b0010011, // ADDI
+        7'b0000011: begin // LW
+          ID_opcode   <= IF_instr[6:0];
+          ID_funct3   <= IF_instr[14:12];
+          ID_rd       <= IF_instr[11:7];
+          ID_indiceR1 <= IF_instr[19:15];
+          ID_r1       <= banco_regs[IF_instr[19:15]];
+          ID_imm      <= IF_instr[31:20];
+          ID_regwrite <= 1;
+        end
+
+        7'b0100011: begin // SW
+          ID_opcode   <= IF_instr[6:0];
+          ID_funct3   <= IF_instr[14:12];
+          ID_indiceR1 <= IF_instr[19:15];
+          ID_indiceR2 <= IF_instr[24:20];
+          ID_r1       <= banco_regs[IF_instr[19:15]];
+          ID_r2       <= banco_regs[IF_instr[24:20]];
+          ID_imm      <= {8'b0, IF_instr[31:25], IF_instr[11:7]};
+          ID_regwrite <= 0;
+        end
+
+        7'b0110011: begin // R-Type
+          ID_opcode   <= IF_instr[6:0];
+          ID_funct3   <= IF_instr[14:12];
+          ID_funct7   <= IF_instr[31:25];
+          ID_rd       <= IF_instr[11:7];
+          ID_indiceR1 <= IF_instr[19:15];
+          ID_indiceR2 <= IF_instr[24:20];
+          ID_r1       <= banco_regs[IF_instr[19:15]];
+          ID_r2       <= banco_regs[IF_instr[24:20]];
+          ID_regwrite <= 1;
+        end
+
+        7'b1100011: begin // bge e blt
+          ID_imm        <= {8'b0, IF_instr[31:25], IF_instr[11:7]};
+          ID_indiceR2   <= IF_instr[24:20];
+          ID_indiceR1   <= IF_instr[19:15];
+          ID_r2         <= banco_regs[IF_instr[24:20]];
+          ID_r1         <= banco_regs[IF_instr[19:15]];
+          ID_funct3     <= IF_instr[14:12];
+          ID_opcode     <= IF_instr[6:0];
+          ID_regwrite   <= 0;
+        end
+
+        7'b1101111: begin // jal
+          ID_imm        <= {IF_instr[31], IF_instr[19:12], IF_instr[20], IF_instr[30:21], 1'b0};
+          ID_rd         <= IF_instr[11:7];
+          ID_opcode     <= IF_instr[6:0];
+          ID_regwrite   <= 1;
+          flag_jump     <= 1;
+        end
+
+        7'b0010111: begin // auipc
+          imm_sext      <= {IF_instr[31:12], 12'b0};
+          imm_shift     <= {IF_instr[31:12], 12'b0};
+          ID_PC         <= IF_PC;
+          ID_rd         <= IF_instr[11:7];
+          ID_opcode     <= IF_instr[6:0];
+          ID_regwrite   <= 1;
+        end
+
+        default: begin
+          ID_opcode     <= 0;
+          ID_regwrite   <= 0;
+        end
+      endcase
     end
   end
 
   //====================
   // Estágio EX
   //====================
-  always @(posedge clock or posedge reset) begin
+   always @(posedge clock or posedge reset) begin
     if (reset) begin
-      EX_MEM_alu_result <= 0;
-      EX_MEM_rd         <= 0;
-      EX_MEM_rs2_data   <= 0;
-      EX_MEM_opcode     <= 0;
+      EX_instr    <= 0;
+      EX_rd       <= 0;
+      EX_opcode   <= 0;
+      EX_regwrite <= 0;
+      EX_alu_result <= 0;
+      EX_r2       <= 0;
+      EX_imm      <= 0;
+      EX_salto_cond <= 0;
     end else begin
-      EX_MEM_opcode     <= ID_EX_opcode;
-      EX_MEM_rd         <= ID_EX_rd;
-      EX_MEM_rs2_data   <= ID_EX_rs2_data;
+      EX_instr      <= ID_instr;
+      EX_rd         <= ID_rd;
+      EX_opcode     <= ID_opcode;
+      EX_imm        <= ID_imm;
+      EX_r2         <= ID_r2;
+      EX_regwrite   <= ID_regwrite;
+      EX_alu_result <= alu_result;
 
-      case (ID_EX_opcode)
-        7'b0110011: begin // R-type (add, sub)
-          if (ID_EX_funct7 == 7'b0100000)
-            EX_MEM_alu_result <= ID_EX_rs1_data - ID_EX_rs2_data; // sub
-          else
-            EX_MEM_alu_result <= ID_EX_rs1_data + ID_EX_rs2_data; // add
-        end
-        7'b0010011: begin // addi
-          EX_MEM_alu_result <= ID_EX_rs1_data + ID_EX_imm;
-        end
-        7'b0000011,        // lw
-        7'b0100011: begin  // sw
-          EX_MEM_alu_result <= ID_EX_rs1_data + ID_EX_imm; // endereço
-        end
-        default: EX_MEM_alu_result <= 0;
-      endcase
+      if (ID_opcode == 7'b1100011) begin
+        EX_salto_cond <= branch_taken;
+        branch_valor  <= branch_target;
+      end else begin
+        EX_salto_cond <= 0;
+      end
     end
   end
+
 
   //====================
   // Estágio MEM
   //====================
-  always @(posedge clock or posedge reset) begin
+    always @(posedge clock or posedge reset) begin
     if (reset) begin
-      MEM_WB_data   <= 0;
-      MEM_WB_rd     <= 0;
-      MEM_WB_opcode <= 0;
+      MEM_instr    <= 0;
+      MEM_rd       <= 0;
+      MEM_opcode   <= 0;
+      MEM_data     <= 0;
+      MEM_regwrite <= 0;
     end else begin
-      MEM_WB_rd     <= EX_MEM_rd;
-      MEM_WB_opcode <= EX_MEM_opcode;
+      MEM_instr    <= EX_instr;
+      MEM_rd       <= EX_rd;
+      MEM_opcode   <= EX_opcode;
+      MEM_regwrite <= EX_regwrite;
 
-      case (EX_MEM_opcode)
+      case (EX_opcode)
         7'b0000011: // lw
-          MEM_WB_data <= data_mem[EX_MEM_alu_result];
+          MEM_data <= {16'b0, data_mem[EX_alu_result]};
         7'b0100011: // sw
-          data_mem[EX_MEM_alu_result] <= EX_MEM_rs2_data;
+          data_mem[EX_alu_result] <= EX_r2[15:0];
         default:
-          MEM_WB_data <= EX_MEM_alu_result;
+          MEM_data <= EX_alu_result;
       endcase
     end
   end
 
+
   //====================
   // Estágio WB
   //====================
-  always @(posedge clock or posedge reset) begin
-    if (reset) begin end
-    else if (MEM_WB_opcode != 7'b0100011 && MEM_WB_rd != 0) begin
-      regfile[MEM_WB_rd] <= MEM_WB_data;
+    always @(posedge clock or posedge reset) begin
+    if (reset) begin
+      // Nada a fazer no reset
+    end else begin
+      if (MEM_regwrite && MEM_rd != 0) begin
+        banco_regs[MEM_rd] <= MEM_data;
+        register_address   <= banco_regs[1]; // x1
+      end
     end
   end
+
 
 endmodule

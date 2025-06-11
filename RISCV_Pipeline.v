@@ -6,7 +6,7 @@ module RISCV_Pipeline (
   integer i;
 
   //===============================
-  // MemÃ³rias e banco de registradores
+  // Memórias e banco de registradores
   //===============================
   reg [31:0] instr_mem [0:21];    // Memoria de instruçoes
   reg [31:0] data_mem  [0:255];   // Memoria de dados
